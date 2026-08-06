@@ -1,37 +1,44 @@
 /**
- * CS Agent Tracker — Apps Script
+ * CS Agent Tracker — Apps Script (v2)
  * Bound to the "CS Agent Tracker" Google Sheet.
  *
- * Responsibilities:
- *  1. ingestSynthesis()  — pull the latest cs-agent-synthesis.json from Drive
- *                          (written daily by the Cowork/Claude agent) and write
- *                          Renewal Risk (Agent), Risk Rationale, Context and
- *                          Context Updated into the Accounts tab.
- *  2. checkRenewals()    — deterministic date-math alerts to Slack:
- *                          - renewal <= 90 days & status "Not started"
- *                          - renewal date overdue or TBC on an in-life account
- *                          - Red health / At Risk digest
- *  3. main()             — run both; attach to a daily 8-9am trigger.
+ * v2 changes:
+ *  - Columns are resolved BY HEADER NAME, never by fixed index. You can
+ *    reorder, add or remove columns freely; the script only writes into
+ *    columns whose headers it finds, and NEVER extends the grid.
+ *  - Every agent-written field OVERWRITES the single cell for that customer
+ *    on every run (Risk Rationale, Context, Next/Last Meeting, Summary,
+ *    Outstanding Actions, Last Alert Sent). Nothing accumulates.
+ *  - Ingests the new synthesis fields: next_meeting, last_meeting_date,
+ *    last_meeting_summary, outstanding_actions.
  *
- * Setup (one-time):
- *  - Project Settings > Script Properties: add SLACK_WEBHOOK_URL
- *    (create at api.slack.com > Your App > Incoming Webhooks > #cs-agent-alerts)
- *  - Run setupTriggers() once, authorise scopes.
+ * Responsibilities:
+ *  1. ingestSynthesis() — pull the newest cs-agent-synthesis.json from Drive
+ *     (written each weekday by the Cowork agent) into the Accounts tab.
+ *  2. checkRenewals()   — deterministic date-math alerts to Slack.
+ *  3. main()            — run both; attach to the daily 8-9am trigger.
+ *
+ * Setup (one-time): Script Property SLACK_WEBHOOK_URL; run setupTriggers().
  */
 
 var SHEET_NAME = 'Accounts';
 var SYNTHESIS_FILE = 'cs-agent-synthesis.json';
 var RENEWAL_WINDOW_DAYS = 90;
 
-// Column indexes (1-based) — keep in sync with the sheet
-var COL = {
-  CUSTOMER: 1, TYPE: 2, OWNER: 3, VALUE: 4, EFFECTIVE: 5, TERM: 6,
-  EXPANSION: 7, SOW: 8, HEALTH: 9, RISK_AGENT: 10, RISK_RATIONALE: 11,
-  LAST_QBR: 12, RENEWAL_DATE: 13, DAYS_TO_RENEWAL: 14, TRIGGER_90: 15,
-  RENEWAL_STATUS: 16, ASSETS: 17, ASSETS_LAST_RENEWAL: 18, FLEX_ELIGIBLE: 19,
-  FLEX_STATUS: 20, NEXT_MEETING: 21, LAST_MEETING_DATE: 22,
-  LAST_MEETING_SUMMARY: 23, OUTSTANDING: 24, CONTEXT: 25, CONTEXT_UPDATED: 26,
-  NOTES: 27, LAST_ALERT: 28
+/** Header names as they appear in row 1 (case/space-insensitive match). */
+var HDR = {
+  CUSTOMER: 'Customer',
+  HEALTH: 'Account Health',
+  RISK_AGENT: 'Renewal Risk (Agent)',
+  RISK_RATIONALE: 'Risk Rationale (Agent)',
+  RENEWAL_DATE: 'Renewal Date',
+  RENEWAL_STATUS: 'Renewal Status',
+  NEXT_MEETING: 'Next Meeting',
+  LAST_MEETING_DATE: 'Last Meeting Date',
+  LAST_MEETING_SUMMARY: 'Last Meeting Summary',
+  OUTSTANDING: 'Outstanding Actions',
+  CONTEXT: 'Context - Current State (Agent, daily)',
+  LAST_ALERT: 'Last Alert Sent (system)'
 };
 
 function main() {
@@ -39,8 +46,29 @@ function main() {
   checkRenewals();
 }
 
+/** Resolve {headerKey: columnIndex(1-based)} from row 1. Missing headers → absent. */
+function resolveColumns_(sheet) {
+  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  var norm = function (s) { return String(s).toLowerCase().replace(/\s+/g, ' ').trim(); };
+  var map = {};
+  Object.keys(HDR).forEach(function (key) {
+    var target = norm(HDR[key]);
+    for (var c = 0; c < headers.length; c++) {
+      if (norm(headers[c]) === target) { map[key] = c + 1; return; }
+    }
+    Logger.log('Header not found (field skipped): ' + HDR[key]);
+  });
+  return map;
+}
+
+/** Write value into the customer's row under the named header — overwrite only. */
+function setField_(sheet, col, rowNum, value) {
+  if (!col) return;                      // header missing → skip, never extend grid
+  sheet.getRange(rowNum, col).setValue(value);
+}
+
 /* ------------------------------------------------------------------ */
-/* 1. Ingest the agent's daily synthesis                                */
+/* 1. Ingest the agent's daily synthesis (OVERWRITES, one row/customer) */
 /* ------------------------------------------------------------------ */
 function ingestSynthesis() {
   var files = DriveApp.getFilesByName(SYNTHESIS_FILE);
@@ -53,21 +81,29 @@ function ingestSynthesis() {
 
   var data = JSON.parse(latest.getBlob().getDataAsString());
   var sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAME);
-  var rows = sheet.getDataRange().getValues();
+  var col = resolveColumns_(sheet);
+  if (!col.CUSTOMER) { Logger.log('Customer column not found — aborting'); return; }
+
+  var names = sheet.getRange(2, col.CUSTOMER, sheet.getLastRow() - 1, 1).getValues();
 
   (data.accounts || []).forEach(function (acc) {
-    for (var r = 1; r < rows.length; r++) {
-      if (String(rows[r][COL.CUSTOMER - 1]).trim().toLowerCase() ===
-          String(acc.customer).trim().toLowerCase()) {
-        if (acc.renewal_risk) sheet.getRange(r + 1, COL.RISK_AGENT).setValue(acc.renewal_risk);
-        if (acc.risk_rationale) sheet.getRange(r + 1, COL.RISK_RATIONALE).setValue(acc.risk_rationale);
-        if (acc.context_bullets && acc.context_bullets.length) {
-          sheet.getRange(r + 1, COL.CONTEXT).setValue('• ' + acc.context_bullets.join('\n• '));
-          sheet.getRange(r + 1, COL.CONTEXT_UPDATED).setValue(new Date());
-        }
-        break;
+    var rowNum = null;
+    for (var r = 0; r < names.length; r++) {
+      if (String(names[r][0]).trim().toLowerCase() === String(acc.customer).trim().toLowerCase()) {
+        rowNum = r + 2; break;
       }
     }
+    if (!rowNum) { Logger.log('Customer not in sheet (skipped): ' + acc.customer); return; }
+
+    if (acc.renewal_risk)        setField_(sheet, col.RISK_AGENT, rowNum, acc.renewal_risk);
+    if (acc.risk_rationale)      setField_(sheet, col.RISK_RATIONALE, rowNum, acc.risk_rationale);
+    if (acc.context_bullets && acc.context_bullets.length)
+      setField_(sheet, col.CONTEXT, rowNum, '• ' + acc.context_bullets.join('\n• '));
+    if (acc.next_meeting)        setField_(sheet, col.NEXT_MEETING, rowNum, acc.next_meeting);
+    if (acc.last_meeting_date)   setField_(sheet, col.LAST_MEETING_DATE, rowNum, acc.last_meeting_date);
+    if (acc.last_meeting_summary) setField_(sheet, col.LAST_MEETING_SUMMARY, rowNum, acc.last_meeting_summary);
+    if (acc.outstanding_actions && acc.outstanding_actions.length)
+      setField_(sheet, col.OUTSTANDING, rowNum, '• ' + acc.outstanding_actions.join('\n• '));
   });
   Logger.log('Synthesis ingested: ' + (data.generated_at || 'no timestamp'));
 }
@@ -77,20 +113,24 @@ function ingestSynthesis() {
 /* ------------------------------------------------------------------ */
 function checkRenewals() {
   var sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAME);
+  var col = resolveColumns_(sheet);
+  if (!col.CUSTOMER) return;
   var rows = sheet.getDataRange().getValues();
   var today = new Date(); today.setHours(0, 0, 0, 0);
   var warnings = [], risks = [];
 
+  var get = function (row, key) { return col[key] ? row[col[key] - 1] : ''; };
+
   for (var r = 1; r < rows.length; r++) {
     var row = rows[r];
-    var customer = row[COL.CUSTOMER - 1];
+    var customer = get(row, 'CUSTOMER');
     if (!customer) continue;
 
-    var renewalDate = row[COL.RENEWAL_DATE - 1];
-    var status = String(row[COL.RENEWAL_STATUS - 1] || '');
-    var health = String(row[COL.HEALTH - 1] || '');
-    var riskAgent = String(row[COL.RISK_AGENT - 1] || '');
-    var alertState = parseAlertState(row[COL.LAST_ALERT - 1]);
+    var renewalDate = get(row, 'RENEWAL_DATE');
+    var status = String(get(row, 'RENEWAL_STATUS') || '');
+    var health = String(get(row, 'HEALTH') || '');
+    var riskAgent = String(get(row, 'RISK_AGENT') || '');
+    var alertState = parseAlertState(get(row, 'LAST_ALERT'));
 
     if (renewalDate instanceof Date) {
       var days = Math.round((renewalDate - today) / 86400000);
@@ -98,26 +138,25 @@ function checkRenewals() {
         if (shouldAlert(alertState, 'overdue', 7)) {
           warnings.push(':rotating_light: *' + customer + '* renewal is *OVERDUE* (' +
             fmt(renewalDate) + ', status: ' + status + ')');
-          markAlert(sheet, r + 1, alertState, 'overdue');
+          markAlert(sheet, r + 1, col.LAST_ALERT, alertState, 'overdue');
         }
       } else if (days <= RENEWAL_WINDOW_DAYS && days >= 0 && status === 'Not started') {
         if (shouldAlert(alertState, 'window90', 7)) {
           warnings.push(':hourglass_flowing_sand: *' + customer + '* renews in *' + days +
             ' days* (' + fmt(renewalDate) + ') and the renewal is *Not started*');
-          markAlert(sheet, r + 1, alertState, 'window90');
+          markAlert(sheet, r + 1, col.LAST_ALERT, alertState, 'window90');
         }
       }
     } else if (!renewalDate && status !== 'On Hold' && status !== 'Churned') {
       if (shouldAlert(alertState, 'tbcDate', 14)) {
         warnings.push(':grey_question: *' + customer + '* has *no renewal date* on record — check the contract position');
-        markAlert(sheet, r + 1, alertState, 'tbcDate');
+        markAlert(sheet, r + 1, col.LAST_ALERT, alertState, 'tbcDate');
       }
     }
 
     if (health === 'Red' || riskAgent === 'Red') {
       risks.push('*' + customer + '*' +
-        (row[COL.RISK_RATIONALE - 1] ? ' — ' + row[COL.RISK_RATIONALE - 1] : '') +
-        (row[COL.OUTSTANDING - 1] ? '\n   Outstanding: ' + row[COL.OUTSTANDING - 1] : ''));
+        (get(row, 'RISK_RATIONALE') ? ' — ' + get(row, 'RISK_RATIONALE') : ''));
     }
   }
 
@@ -137,9 +176,10 @@ function shouldAlert(state, key, cooldownDays) {
   if (!state[key]) return true;
   return (new Date() - new Date(state[key])) / 86400000 >= cooldownDays;
 }
-function markAlert(sheet, rowNum, state, key) {
+function markAlert(sheet, rowNum, colIndex, state, key) {
+  if (!colIndex) return;                 // header missing → do not extend grid
   state[key] = new Date().toISOString();
-  sheet.getRange(rowNum, COL.LAST_ALERT).setValue(JSON.stringify(state));
+  sheet.getRange(rowNum, colIndex).setValue(JSON.stringify(state));
 }
 function fmt(d) {
   return Utilities.formatDate(d, Session.getScriptTimeZone(), 'dd MMM yyyy');

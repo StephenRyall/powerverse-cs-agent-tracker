@@ -1,6 +1,6 @@
 # Phase 3 — moving the CS Agent from Cowork to GitHub Actions
 
-About 45 minutes, once. Four things to set up, then a test run.
+About 45 minutes, once. Nine short steps: gather credentials, store them in two places, verify, calibrate, go live.
 
 **What you gain over the Cowork schedule** (which already works fine):
 
@@ -69,7 +69,25 @@ claude setup-token
 
 Copy the result. It lasts a year — diarise a renewal, because the job stops when it expires.
 
-## Step 5 — GitHub repository secrets (5 min)
+## Step 5 — Collect the values locally FIRST (2 min)
+
+Do this before touching GitHub. **GitHub secrets are write-only**: once saved you can replace one
+but you can never read it back, and the Google refresh token is printed to your terminal exactly
+once and stored nowhere. Enter them into GitHub first and you will find yourself re-minting
+tokens to fill in `.env` later.
+
+```bash
+cd ~/Desktop/agents/cs-agent-tracker      # your clone
+cp .env.example .env
+```
+
+Open `.env` and paste in the seven values from steps 2–4. That file is now your source of truth;
+you will copy from it into GitHub in the next step.
+
+`.env` is gitignored, but it holds a token with read access to your mailbox — confirm
+`git status` doesn't list it before you commit anything.
+
+## Step 6 — Paste them into GitHub (5 min)
 
 These go in **GitHub**, on the `powerverse-cs-agent-tracker` repo — not Google, not Slack, not
 Anthropic. GitHub encrypts them and exposes them only to the workflow at run time; they are never
@@ -85,15 +103,15 @@ or click through: **your repo → Settings** (the tab along the top of the repo,
 settings) **→ Secrets and variables → Actions → New repository secret**. Add each of these,
 pasting the value from the step shown:
 
-| Secret | From |
+| Secret | Copy from your `.env` |
 |---|---|
-| `GOOGLE_CLIENT_ID` | step 2 |
-| `GOOGLE_CLIENT_SECRET` | step 2 |
-| `GOOGLE_REFRESH_TOKEN` | step 2 |
-| `SLACK_USER_TOKEN` | step 3 (`xoxp-`) |
-| `SLACK_BOT_TOKEN` | step 3 (`xoxb-`) |
+| `GOOGLE_CLIENT_ID` | `GOOGLE_CLIENT_ID` |
+| `GOOGLE_CLIENT_SECRET` | `GOOGLE_CLIENT_SECRET` |
+| `GOOGLE_REFRESH_TOKEN` | `GOOGLE_REFRESH_TOKEN` |
+| `SLACK_USER_TOKEN` | `SLACK_USER_TOKEN` (`xoxp-`) |
+| `SLACK_BOT_TOKEN` | `SLACK_BOT_TOKEN` (`xoxb-`) |
 | `SLACK_CHANNEL_ID` | `C0BMQ4PGDA7` |
-| `CLAUDE_CODE_OAUTH_TOKEN` | step 4 |
+| `CLAUDE_CODE_OAUTH_TOKEN` | `CLAUDE_CODE_OAUTH_TOKEN` |
 
 Note the two tabs on that page. **Secrets** are encrypted and write-only — you can never read one
 back, only replace it. **Variables** are plain text and visible. Everything in the table above is
@@ -103,22 +121,14 @@ Optional, on the **Variables** tab of the same page: `CS_AGENT_MAX_USD` to chang
 budget cap (default 6). It is a variable rather than a secret because there is nothing sensitive
 about it and it is handy to see at a glance.
 
-## Step 6 — Preflight (5 min)
+## Step 7 — Preflight (5 min)
 
 Run this **from inside the repo folder**, not your home directory, and use `python3` — macOS has
-no `python` or `pip` on the PATH, only the `3`-suffixed versions.
-
-The seven values you just saved are in GitHub, not on your Mac, so give the script a local copy:
-
-```bash
-cd ~/path/to/powerverse-cs-agent-tracker
-cp .env.example .env
-```
-
-Open `.env`, paste in the same values from step 5, and save. It is gitignored — check
-`git status` shows nothing before you next commit.
+no `python` or `pip` on the PATH, only the `3`-suffixed versions. It reads the `.env` you created
+in step 5.
 
 ```bash
+cd ~/Desktop/agents/cs-agent-tracker
 python3 scripts/preflight.py --slack
 ```
 
@@ -139,7 +149,7 @@ system Python with an "externally managed environment" error.
 
 **If `python3` itself is missing**, install Apple's command line tools: `xcode-select --install`.
 
-## Step 7 — Calibrate on two accounts (10 min)
+## Step 8 — Calibrate on two accounts (10 min)
 
 Don't go live on an estimate. In Claude Code, run `/usage` and note the **5-hour** and **weekly**
 percentages. Then:
@@ -155,7 +165,7 @@ python3 scripts/calibrate.py out/run.log --plan-share <the % you just measured> 
 
 Verdict bands: **≥50%** of your 5-hour window fails, **30–50%** warns, **<30%** is comfortable.
 
-## Step 8 — Full dry run, then live
+## Step 9 — Full dry run, then live
 
 1. **Run workflow** with `dry_run` ticked — full agent, no Drive write, no Slack post. Download
    the `cs-agent-run-*` artifact and read `out/cs-agent-synthesis.json` and `out/brief.md`.
@@ -201,7 +211,7 @@ Mon/Tue/Fri because every recurring customer meeting is Tuesday (Cord, Evtec, En
 
 | Symptom | Fix |
 |---|---|
-| `Google credentials missing from the environment` | a secret is unset or misnamed — step 5 |
+| `Google credentials missing from the environment` | a value is missing from `.env` (local) or from repo secrets (Actions) — steps 5 and 6 |
 | `invalid_grant` on token refresh | consent screen was External + Testing; switch to Internal, re-mint |
 | `not_allowed_token_type` from Slack search | search needs the `xoxp-` user token, not the bot token |
 | `not_in_channel` when posting | `/invite @CS Agent` in #cs-agent-alerts |
@@ -212,6 +222,7 @@ Mon/Tue/Fri because every recurring customer meeting is Tuesday (Cord, Evtec, En
 | `command not found: python` / `pip` | macOS only has `python3` / `pip3`. Use `python3 -m pip`, never bare `pip` |
 | `No such file or directory: mcp/requirements.txt` | you are in `~`, not the repo — `cd` into the clone first |
 | `externally-managed-environment` on pip install | use a venv: `python3 -m venv .venv && source .venv/bin/activate` |
+| Lost a GitHub secret's value | You cannot read one back — they are write-only. Re-mint it (`get_google_refresh_token.py` forces a fresh token) and update **both** `.env` and the GitHub secret so only one is in circulation |
 | Nothing fires | Actions disables schedules after 60 days of repo inactivity — push a commit or run manually monthly |
 | Claude token expired | `claude setup-token` again, update the secret |
 

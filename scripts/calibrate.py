@@ -30,7 +30,10 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 from log_run_cost import load_result  # noqa: E402
 
-WEEKDAYS_PER_MONTH = 21.7
+# The agent runs Mon/Tue/Fri, not every weekday. Assuming 21.7 runs a month
+# inflated every monthly figure by ~65%.
+DEFAULT_RUNS_PER_WEEK = 3.0
+WEEKS_PER_MONTH = 52 / 12
 
 
 def main() -> int:
@@ -38,6 +41,8 @@ def main() -> int:
     ap.add_argument("log", nargs="?", default="out/run.log")
     ap.add_argument("--calibration", default="out/calibration.json")
     ap.add_argument("--budget-usd-month", type=float)
+    ap.add_argument("--runs-per-week", type=float, default=DEFAULT_RUNS_PER_WEEK,
+                    help="scheduled runs per week (default 3 = Mon/Tue/Fri)")
     ap.add_argument("--plan-share", type=float,
                     help="%% of the 5-hour window the SAMPLE consumed (from /usage)")
     args = ap.parse_args()
@@ -62,8 +67,13 @@ def main() -> int:
 
     tin = total("inputTokens", "input_tokens")
     tout = total("outputTokens", "output_tokens")
+    # Cache tokens are billed (writes at 1.25x input, reads at 0.10x) and on a fresh
+    # run they dominate. Omitting them made "tokens" look ~10x smaller than the cost
+    # implied, which is nonsense the eye can catch but a script cannot.
+    tcw = total("cacheCreationInputTokens", "cache_creation_input_tokens")
+    tcr = total("cacheReadInputTokens", "cache_read_input_tokens")
     cost = float(result.get("total_cost_usd", 0) or 0)
-    tokens = tin + tout
+    tokens = tin + tout + tcw + tcr
 
     print("=" * 66)
     if sampled and full and scale > 1:
@@ -73,6 +83,10 @@ def main() -> int:
         print("FULL RUN (no calibration file - treating this as the whole roster)")
     print("=" * 66)
     print(f"\nMeasured    {tokens:>12,} tokens   ${cost:>7.2f}")
+    print(f"              {tin:>12,}   input")
+    print(f"              {tout:>12,}   output")
+    print(f"              {tcw:>12,}   cache writes")
+    print(f"              {tcr:>12,}   cache reads")
     if model_usage:
         for name in sorted(model_usage):
             m = model_usage[name]
@@ -80,12 +94,35 @@ def main() -> int:
                 + int(m.get("outputTokens", m.get("output_tokens", 0)) or 0)
             print(f"              {mt:>12,}   {name}")
 
-    p_tokens, p_cost = tokens * scale, cost * scale
-    print(f"\nProjected full run")
-    print(f"  tokens      {round(p_tokens):>12,}")
-    print(f"  cost        ${p_cost:>11.2f} per run")
-    print(f"  per month   ${p_cost * WEEKDAYS_PER_MONTH:>11.2f}   ({WEEKDAYS_PER_MONTH:.1f} weekdays)")
-    print(f"  per year    ${p_cost * 260:>11.2f}")
+    # A run has fixed cost (sheet read, two calendar fetches, shared context, the
+    # brief) and variable cost (per-account research). Scaling everything linearly
+    # inflates the fixed part by the scale factor. Assume ~60% of a small sample is
+    # fixed, and give a range rather than a single misleading number.
+    fixed_share = 0.6 if (sampled or 0) <= 3 else 0.35
+    fixed, variable = tokens * fixed_share, tokens * (1 - fixed_share)
+    p_tokens_lin = tokens * scale
+    p_tokens_adj = fixed + variable * scale
+    p_cost_lin, p_cost_adj = cost * scale, cost * (fixed_share + (1 - fixed_share) * scale)
+
+    if scale > 1 and sampled and sampled <= 3:
+        print(f"\n  !! SMALL SAMPLE WARNING ({sampled} accounts)")
+        print(f"     Two things make a sample this small over-estimate badly:")
+        print(f"     1. Fixed costs (calendar, sheet, shared context, brief) are paid")
+        print(f"        once per run but get multiplied by {scale:.1f} here.")
+        if "sonnet" not in " ".join(model_usage).lower() and len(model_usage) < 3:
+            print(f"     2. No Sonnet in modelUsage - with so few accounts the agent")
+            print(f"        worked inline on the main model instead of delegating to")
+            print(f"        cheaper subagents, so this priced the worst case.")
+        print(f"     Re-run with sample_size=6, or just do a full dry run and measure it.")
+
+    p_tokens, p_cost = p_tokens_adj, p_cost_adj
+    print(f"\nProjected full run  (fixed/variable adjusted; linear figure in brackets)")
+    print(f"  tokens      {round(p_tokens):>12,}   (linear: {round(p_tokens_lin):,})")
+    print(f"  cost        ${p_cost:>11.2f} per run   (linear: ${p_cost_lin:.2f})")
+    runs_month = args.runs_per_week * WEEKS_PER_MONTH
+    print(f"  per month   ${p_cost * runs_month:>11.2f}   ({runs_month:.1f} runs at "
+          f"{args.runs_per_week:g}/week)")
+    print(f"  per year    ${p_cost * args.runs_per_week * 52:>11.2f}")
 
     verdict = 0
 
@@ -107,9 +144,18 @@ def main() -> int:
             print(f"  VERDICT: comfortable - {projected_share:.0f}% leaves you headroom.")
 
     if args.budget_usd_month is not None:
-        monthly = p_cost * WEEKDAYS_PER_MONTH
+        # On subscription auth nothing is actually billed - total_cost_usd is a
+        # notional list-price figure. Say so, or the number reads as an invoice.
+        sub = bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")) and not os.environ.get("ANTHROPIC_API_KEY")
+        monthly = p_cost * args.runs_per_week * WEEKS_PER_MONTH
         pct = 100 * monthly / args.budget_usd_month if args.budget_usd_month else 0
-        print(f"\nAgainst your ${args.budget_usd_month:.2f}/month budget")
+        if sub:
+            print(f"\n  NOTE: you are on subscription auth, so this dollar figure is")
+            print(f"  notional - the list price this WOULD cost on pay-as-you-go API.")
+            print(f"  Nothing is billed. Judge fit by the plan-share verdict above,")
+            print(f"  not by this. Useful only as a relative measure between runs.")
+        print(f"\nAgainst your ${args.budget_usd_month:.2f}/month budget"
+              + (" (notional)" if sub else ""))
         print(f"  projected   ${monthly:.2f}  ({pct:.0f}% of budget)")
         if monthly > args.budget_usd_month:
             print(f"  VERDICT: OVER budget by ${monthly - args.budget_usd_month:.2f}/month.")

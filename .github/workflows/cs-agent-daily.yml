@@ -1,0 +1,165 @@
+name: CS Agent Tracker — synthesis
+
+# Mon/Tue/Fri at 03:00 UTC = 04:00 BST / 03:00 GMT. Both land in the early hours, so the
+# 5-hour usage window this consumes has reset before the working day starts. Because the
+# target is "before work" rather than an exact local time, one UTC cron is correct all
+# year and there is no DST gate to maintain.
+#
+# Mon = weekly full refresh. Tue and Fri are where every recurring customer meeting falls
+# (Cord / Evtec / EnSmart on Tuesdays, Sevadis on Fridays); Wed and Thu have none.
+on:
+  schedule:
+    - cron: "0 3 * * 1,2,5"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run the agent but skip the Drive upload and Slack post"
+        type: boolean
+        default: false
+      sample_size:
+        description: "Calibration: research only the first N accounts (e.g. 2). Implies dry run."
+        type: string
+        default: ""
+      budget_usd_month:
+        description: "Calibration: your monthly budget for this agent, for a pass/fail verdict"
+        type: string
+        default: ""
+      plan_share:
+        description: "Calibration: %% of your 5-hour window the run used (see docs/CALIBRATION.md)"
+        type: string
+        default: ""
+
+concurrency:
+  group: cs-agent-daily
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # only to append metrics/runs.csv
+
+jobs:
+  synthesis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      # Google — read-only scopes; the only write is scripts/upload_synthesis.py
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+      # Slack — user token for search.messages, bot token for posting
+      SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+      # Research subagents run a cheaper tier than the synthesis loop. They do
+      # extraction and summarisation; the judgement calls stay on the main model.
+      # Drop to `haiku` once metrics/runs.csv shows a quality baseline to compare against.
+      CLAUDE_CODE_SUBAGENT_MODEL: sonnet
+      # Keep per-tool results tight - ~130 tool calls a run means a generous
+      # per-call ceiling is how the context blows up.
+      PV_MAX_TOOL_CHARS: "25000"
+      PV_MAX_BODY_CHARS: "6000"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          pip install -r mcp/requirements.txt
+
+      - name: Fetch live roster from the tracker
+        id: roster
+        env:
+          PV_ACCOUNT_LIMIT: ${{ inputs.sample_size }}
+        run: python scripts/fetch_roster.py out
+
+      - name: Run the CS agent
+        env:
+          # Subscription token. A Console API key would be preferable (separate billing
+          # pool, so the agent could never eat into interactive usage) but Powerverse IT
+          # will not issue one, so this run shares Stephen's allowance. That is why the
+          # schedule is 04:00 and why --max-budget-usd is set.
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          set -o pipefail
+          claude -p "$(cat agent/daily-agent-prompt.md)" \
+            --mcp-config .mcp.json \
+            --strict-mcp-config \
+            --permission-mode dontAsk \
+            --allowedTools "Read,Write,Edit,Bash,Glob,Grep,Task,mcp__pv-workspace" \
+            --model opus \
+            --effort medium \
+            --max-budget-usd "${{ vars.CS_AGENT_MAX_USD || '6' }}" \
+            --output-format json > out/run.log
+          # json output is the payload, not a transcript - surface the agent's
+          # closing text in the log so a failed run is still readable.
+          python -c "import json;print(json.load(open('out/run.log')).get('result',''))" || true
+
+      - name: Record run cost and change rate
+        if: always()
+        run: python scripts/log_run_cost.py out/run.log out/signal.json
+
+      - name: Project a full run from the sample
+        if: inputs.sample_size != ''
+        run: |
+          python scripts/calibrate.py out/run.log \
+            ${{ inputs.budget_usd_month && format('--budget-usd-month {0}', inputs.budget_usd_month) || '' }} \
+            ${{ inputs.plan_share && format('--plan-share {0}', inputs.plan_share) || '' }} \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate synthesis against the live roster
+        run: |
+          if [ "$(date -u +%u)" = "1" ] && [ -z "${{ inputs.sample_size }}" ]; then
+            MODE=--require-full   # Monday: every account must be covered
+          else
+            MODE=--allow-subset   # Tue/Fri: dormant accounts are deliberately skipped
+          fi
+          python scripts/validate_synthesis.py out/cs-agent-synthesis.json out/roster.txt $MODE
+
+      - name: Upload synthesis to Drive
+        if: ${{ !inputs.dry_run && inputs.sample_size == '' }}
+        run: python scripts/upload_synthesis.py out/cs-agent-synthesis.json
+
+      - name: Post morning brief to Slack
+        if: ${{ !inputs.dry_run && inputs.sample_size == '' }}
+        run: python scripts/post_to_slack.py out/brief.md
+
+      - name: Commit metrics
+        if: ${{ !inputs.dry_run && inputs.sample_size == '' }}
+        run: |
+          git config user.name  "cs-agent[bot]"
+          git config user.email "cs-agent@users.noreply.github.com"
+          git add metrics/runs.csv
+          git diff --staged --quiet || git commit -m "metrics: run ${{ github.run_number }}"
+          git push || echo "push failed (non-fatal) - metrics are also in the artifact"
+
+      - name: Keep the run's working files for 14 days
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cs-agent-run-${{ github.run_number }}
+          path: |
+            out/
+          if-no-files-found: warn
+          retention-days: 14
+
+      # A silent failure is worse than a bad brief: if any step above broke, say so
+      # in the same channel that would otherwise have had a brief in it.
+      - name: Report failure to Slack
+        if: failure()
+        run: |
+          mkdir -p out
+          cat > out/failure.md <<EOF
+          :rotating_light: *CS Agent run failed* — no brief today.
+          Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|run ${{ github.run_number }}>
+          Check the run log artifact for the failing step. The sheet keeps yesterday's values.
+          EOF
+          python scripts/post_to_slack.py out/failure.md || true

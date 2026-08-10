@@ -1,0 +1,3 @@
+# Everything else the MCP server needs is Python stdlib, deliberately.
+# pypdf is the single dependency, used only to text-extract SOW PDFs from Drive.
+pypdf==5.1.0

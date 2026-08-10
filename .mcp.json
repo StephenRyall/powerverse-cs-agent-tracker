@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "pv-workspace": {
+      "command": "python3",
+      "args": ["mcp/pv_workspace_mcp.py"],
+      "env": {
+        "GOOGLE_CLIENT_ID": "${GOOGLE_CLIENT_ID}",
+        "GOOGLE_CLIENT_SECRET": "${GOOGLE_CLIENT_SECRET}",
+        "GOOGLE_REFRESH_TOKEN": "${GOOGLE_REFRESH_TOKEN}",
+        "SLACK_USER_TOKEN": "${SLACK_USER_TOKEN}"
+      }
+    }
+  }
+}

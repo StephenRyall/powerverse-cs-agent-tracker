@@ -69,9 +69,21 @@ claude setup-token
 
 Copy the result. It lasts a year — diarise a renewal, because the job stops when it expires.
 
-## Step 5 — Repo secrets (5 min)
+## Step 5 — GitHub repository secrets (5 min)
 
-**Settings → Secrets and variables → Actions → New repository secret:**
+These go in **GitHub**, on the `powerverse-cs-agent-tracker` repo — not Google, not Slack, not
+Anthropic. GitHub encrypts them and exposes them only to the workflow at run time; they are never
+visible in logs or to anyone browsing the repo.
+
+Go to:
+
+```
+https://github.com/StephenRyall/powerverse-cs-agent-tracker/settings/secrets/actions
+```
+
+or click through: **your repo → Settings** (the tab along the top of the repo, not your account
+settings) **→ Secrets and variables → Actions → New repository secret**. Add each of these,
+pasting the value from the step shown:
 
 | Secret | From |
 |---|---|
@@ -83,18 +95,49 @@ Copy the result. It lasts a year — diarise a renewal, because the job stops wh
 | `SLACK_CHANNEL_ID` | `C0BMQ4PGDA7` |
 | `CLAUDE_CODE_OAUTH_TOKEN` | step 4 |
 
-Optional, under **Variables** not Secrets: `CS_AGENT_MAX_USD` to change the per-run budget cap
-(default 6).
+Note the two tabs on that page. **Secrets** are encrypted and write-only — you can never read one
+back, only replace it. **Variables** are plain text and visible. Everything in the table above is
+a Secret.
 
-## Step 6 — Preflight (2 min)
+Optional, on the **Variables** tab of the same page: `CS_AGENT_MAX_USD` to change the per-run
+budget cap (default 6). It is a variable rather than a secret because there is nothing sensitive
+about it and it is handy to see at a glance.
+
+## Step 6 — Preflight (5 min)
+
+Run this **from inside the repo folder**, not your home directory, and use `python3` — macOS has
+no `python` or `pip` on the PATH, only the `3`-suffixed versions.
+
+The seven values you just saved are in GitHub, not on your Mac, so give the script a local copy:
 
 ```bash
-pip install -r mcp/requirements.txt
-python scripts/preflight.py --slack
+cd ~/path/to/powerverse-cs-agent-tracker
+cp .env.example .env
+```
+
+Open `.env`, paste in the same values from step 5, and save. It is gitignored — check
+`git status` shows nothing before you next commit.
+
+```bash
+python3 scripts/preflight.py --slack
 ```
 
 Eight checks, one line each, every one mapping back to a step above. Fix anything red before
 going further.
+
+No dependencies are needed for preflight — everything it uses is in the Python standard library.
+`pypdf` (from `mcp/requirements.txt`) is only required if you later run the **agent** locally, so
+it can read SOW PDFs; GitHub Actions installs it automatically. If you do want it:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+python3 -m pip install -r mcp/requirements.txt
+```
+
+A virtual environment matters on macOS — recent versions refuse a plain `pip install` into the
+system Python with an "externally managed environment" error.
+
+**If `python3` itself is missing**, install Apple's command line tools: `xcode-select --install`.
 
 ## Step 7 — Calibrate on two accounts (10 min)
 
@@ -107,7 +150,7 @@ It researches two accounts, writes to nothing, and projects the full run. Run `/
 difference is what two accounts cost you. Feed it back:
 
 ```bash
-python scripts/calibrate.py out/run.log --plan-share <the % you just measured> --budget-usd-month 40
+python3 scripts/calibrate.py out/run.log --plan-share <the % you just measured> --budget-usd-month 40
 ```
 
 Verdict bands: **≥50%** of your 5-hour window fails, **30–50%** warns, **<30%** is comfortable.
@@ -166,6 +209,9 @@ Mon/Tue/Fri because every recurring customer meeting is Tuesday (Cord, Evtec, En
 | `not in the sheet's Accounts tab` | agent invented or mistyped a name; if it repeats, check for odd whitespace in the sheet |
 | `Budget limit reached` | check `metrics/runs.csv` first — a jump usually means a search loop, not growth. Raise via variable `CS_AGENT_MAX_USD` |
 | Metrics step can't push | branch protection; non-fatal, the CSV is still in the artifact |
+| `command not found: python` / `pip` | macOS only has `python3` / `pip3`. Use `python3 -m pip`, never bare `pip` |
+| `No such file or directory: mcp/requirements.txt` | you are in `~`, not the repo — `cd` into the clone first |
+| `externally-managed-environment` on pip install | use a venv: `python3 -m venv .venv && source .venv/bin/activate` |
 | Nothing fires | Actions disables schedules after 60 days of repo inactivity — push a commit or run manually monthly |
 | Claude token expired | `claude setup-token` again, update the secret |
 

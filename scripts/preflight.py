@@ -5,9 +5,15 @@ Exercises each dependency with the smallest real call that proves the scope is
 granted, and reports one line per check. Safe to run any time - it reads only,
 except for the optional Slack post which is opt-in.
 
+Credentials come from the environment. Since the real values live in GitHub Actions
+secrets and not on your Mac, this script also loads a local `.env` file if one is
+present, so you can check them without exporting seven variables by hand. `.env` is
+gitignored - never commit it.
+
 Usage:
-  python scripts/preflight.py            # read-only checks
-  python scripts/preflight.py --slack    # also posts a one-line test to the channel
+  cp .env.example .env      # then paste your values in
+  python3 scripts/preflight.py            # read-only checks
+  python3 scripts/preflight.py --slack    # also posts a one-line test to the channel
 """
 
 from __future__ import annotations
@@ -19,6 +25,30 @@ import sys
 import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "mcp"))
+
+
+def load_dotenv(path: str = ".env") -> int:
+    """Minimal .env loader - KEY=value per line, # comments, optional quotes.
+
+    Deliberately does not overwrite anything already exported, so a real shell
+    variable always beats the file.
+    """
+    if not os.path.exists(path):
+        return 0
+    loaded = 0
+    for line in open(path, encoding="utf-8"):
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if key and value and not os.environ.get(key):
+            os.environ[key] = value
+            loaded += 1
+    return loaded
+
+
+_n = load_dotenv()
 import pv_workspace_mcp as pv  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
@@ -32,6 +62,11 @@ def check(label: str, fn) -> None:
 
 
 def main() -> int:
+    if _n:
+        print(f"Loaded {_n} value(s) from .env")
+    elif not os.environ.get("GOOGLE_CLIENT_ID"):
+        print("No .env found and nothing exported - run `cp .env.example .env` and fill it in.\n")
+
     check("Claude auth", lambda: (
         "CLAUDE_CODE_OAUTH_TOKEN set" if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
         else "ANTHROPIC_API_KEY set" if os.environ.get("ANTHROPIC_API_KEY")

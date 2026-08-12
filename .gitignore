@@ -12,3 +12,5 @@ __pycache__/
 # Run artefacts — regenerated every run, never committed
 client_secret*.json
 out/
+# macOS Finder metadata
+.DS_Store

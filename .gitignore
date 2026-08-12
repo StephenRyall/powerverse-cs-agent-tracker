@@ -6,6 +6,8 @@ __pycache__/
 *.log
 *.pyc
 *refresh_token*
+# ...but the helper that MINTS one holds no secret, and setup needs it.
+!scripts/get_google_refresh_token.py
 # --- Phase 3 additions: append these to the repo's existing .gitignore ---
 # Local credential files. Secrets belong in GitHub Actions secrets, nowhere else.
 # Python

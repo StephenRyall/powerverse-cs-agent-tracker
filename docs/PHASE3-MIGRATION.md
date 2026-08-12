@@ -1,33 +1,33 @@
 # Phase 3 — moving the CS Agent from Cowork to GitHub Actions
 
-About 45 minutes, once. Nine short steps: gather credentials, store them in two places, verify, calibrate, go live.
+> **Status: live.** Shipped 2026-08-10 in `ab3a8ae`. The scheduled run has been green since —
+> see `metrics/runs.csv`. This is kept as the record of how it was set up and as
+> the runbook for rebuilding or rotating credentials — steps 2–8 are still the live procedure for
+> that. For how the pipeline works day to day, see the README.
 
-**What you gain over the Cowork schedule** (which already works fine):
+**What it gained over the Cowork schedule** (which worked fine):
 
-- `--effort medium` and Sonnet research subagents — **neither is possible in Cowork**, and
-  together they are the biggest remaining cost lever.
+- `--effort medium` and Sonnet research subagents — neither was possible in Cowork, and together
+  they were the biggest remaining cost lever.
 - `metrics/runs.csv`, committed every run: tokens, cost, and how many accounts actually changed.
-  Cowork tells you nothing.
+  Cowork told you nothing.
 - A validator that rejects the output before it can touch the sheet.
 - The prompt in version control instead of buried in a trigger config.
 - A failure notice in Slack instead of silence.
 
-**What you do not gain:** billing separation. Without a Console API key this still runs on your
-subscription, same pool as your own work. That is why the schedule is 04:00 and why there is a
-budget cap.
+**What it did not gain:** billing separation. Without a Console API key this still runs on
+Stephen's subscription, same pool as his own work. That is why the schedule is 04:00 BST and why
+there is a budget cap.
 
 ---
 
-## Step 1 — Push the code (5 min)
+## Step 1 — Push the code ✅ done
 
-Unzip over your existing clone, then:
+Done in `ab3a8ae`. The code arrived as a zip dropped over the clone, and `.gitignore.additions`
+was appended and deleted in the same commit — which is why the `.gitignore` comments sit slightly
+adrift from the entries they describe. Nothing to repeat here; the repo is now the source.
 
-```bash
-cd powerverse-cs-agent-tracker
-cat .gitignore.additions >> .gitignore && rm .gitignore.additions
-git add -A && git commit -m "Phase 3: headless run in GitHub Actions"
-git push
-```
+Editing is no longer a zip shuffle either: work in the clone with Claude Code and use `/ship`.
 
 ## Step 2 — Google credentials (15 min)
 
@@ -165,7 +165,7 @@ python3 scripts/calibrate.py out/run.log --plan-share <the % you just measured> 
 
 Verdict bands: **≥50%** of your 5-hour window fails, **30–50%** warns, **<30%** is comfortable.
 
-## Step 9 — Full dry run, then live
+## Step 9 — Full dry run, then live ✅ done
 
 1. **Run workflow** with `dry_run` ticked — full agent, no Drive write, no Slack post. Download
    the `cs-agent-run-*` artifact and read `out/cs-agent-synthesis.json` and `out/brief.md`.
@@ -174,38 +174,15 @@ Verdict bands: **≥50%** of your 5-hour window fails, **30–50%** warns, **<30
    Cowork. Do not skip this: two agents writing `cs-agent-synthesis.json` means the Apps Script
    takes whichever landed last, and you get two briefs every morning.
 
+Steps 1 and 2 were done on 2026-08-10 (runs 3 and 4 in `metrics/runs.csv`). **If you have been
+getting two briefs a morning, step 3 was missed** — that is the only thing that causes it.
+
 ---
 
 ## How a run works
 
-```
-Mon/Tue/Fri 03:00 UTC
-  fetch_roster.py     sheet → out/roster.txt + out/accounts.csv
-  claude -p …         researches in-scope accounts via the pv-workspace MCP server,
-                      writes cs-agent-synthesis.json, brief.md, signal.json
-  validate_synthesis  name parity, risk values, date formats  ── fails ⇒ stop
-  upload_synthesis    new cs-agent-synthesis.json in Drive
-  post_to_slack       brief → #cs-agent-alerts
-  log_run_cost        appends metrics/runs.csv, commits it
-08:00–09:00
-  Apps Script         ingests the newest JSON, overwrites the sheet in place
-```
-
-The validator is the gate. If it fails nothing is uploaded or posted except a failure notice, and
-the sheet keeps the previous values — the right failure mode.
-
-**Monday is the full refresh** and the validator requires every account. **Tuesday and Friday**
-are tiered: dormant accounts are deliberately skipped, keep their previous values, and are named
-in the brief's Coverage line.
-
-## Schedule
-
-`0 3 * * 1,2,5` UTC — 04:00 BST, 03:00 GMT. Both are before the working day, so the 5-hour usage
-window resets before you start. Because the target is "before work" rather than an exact local
-time, one UTC cron is right all year and there is no DST edit.
-
-Mon/Tue/Fri because every recurring customer meeting is Tuesday (Cord, Evtec, EnSmart) or Friday
-(Sevadis). Wednesday and Thursday have none.
+Moved to the README, which is now the canonical description of the pipeline, the cadence and the
+validation gate. Keeping a second copy here only guarantees the two drift apart.
 
 ## Troubleshooting
 
@@ -226,8 +203,20 @@ Mon/Tue/Fri because every recurring customer meeting is Tuesday (Cord, Evtec, En
 | Nothing fires | Actions disables schedules after 60 days of repo inactivity — push a commit or run manually monthly |
 | Claude token expired | `claude setup-token` again, update the secret |
 
-## After a fortnight
+## After a fortnight — still pending
 
 Read `metrics/runs.csv`. The `pct_unchanged` column is the business case for the remaining
 optimisations in `docs/TOKEN-OPTIMISATION.md` — deterministic calendar fields, SOW caching, and
 the full delta gate. Don't build them until that column says they're worth it.
+
+Two runs in as of 2026-08-12, which is not yet a sample:
+
+| Run | Cost | `pct_unchanged` |
+|---|---|---|
+| 3 (2026-08-10, manual) | $6.12 | 85 |
+| 4 (2026-08-11, scheduled) | $3.97 | 62 |
+
+Two things to watch rather than act on yet. Run 3 came in at $6.12 against a $6 cap, so the cap
+bounds the agent's own spend and not the total. And an early `pct_unchanged` of 62–85 is the
+signal those optimisations are aimed at — if it holds over a fortnight, most of each run is
+re-deriving things that did not change.

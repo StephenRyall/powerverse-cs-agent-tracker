@@ -188,20 +188,36 @@ how much of the run was avoidable, so a generous reading makes it useless.
 This brief covers **today and every uncovered day until the next run**. On Tuesday that is the
 main event — today's customer calls are why the run exists, so brief them properly.
 
-`out/brief.md`, five sections:
+`out/brief.md`, in this exact shape — `scripts/post_to_slack.py` parses it into Slack Block Kit
+(header, context line, colour-barred body), so the structure is load-bearing:
 
-1. **Meetings today** — briefs for today's events, or "No customer meetings today". Each: day and
-   time, what was previously discussed (last meeting summary + transcript findings), what is
-   outstanding.
-2. **Coming up before the next brief** — the uncovered days, each headed with the day name. State
-   at the top which day the next brief lands. Omit the section if there is nothing. Include
-   dormant customers here if they have a meeting.
-3. **Risk changes** — accounts newly Amber/Red versus the `Renewal Risk (Agent)` column in
-   `out/accounts.csv`, one line each.
-4. **Headlines** — up to 3 developments, one line each.
-5. **Coverage** — one line naming accounts skipped as dormant, so reduced coverage is never
+- **Line 1:** `*CS Agent — Morning Brief, <Weekday> <d Month yyyy>*` (becomes the header).
+- **Line 2:** `_<refresh type; which day the next brief lands>_` (becomes the context line).
+
+Then five sections, each opened by a bold heading alone on its own line:
+
+1. `*Meetings today*` — or "No customer meetings today." one-liner. Each meeting: a bold line
+   `*HH:MM — <title>* (<key attendees>)`, then **at most 3 bullets** — `_Last:_` what the
+   previous session settled, `_Live:_` the open thread going in, `_Watch:_` the conflict or
+   question to land. **Each bullet ≤ 22 words.** Detail beyond that belongs in the synthesis
+   JSON, not the brief.
+2. `*Coming up before the next brief*` — one bullet per uncovered-day meeting,
+   `• *<Day> HH:MM — <title>:* <the one thing to know>`, **≤ 20 words each**. Omit the section
+   if there is nothing. Include dormant customers here if they have a meeting.
+3. `*Risk changes*` — accounts changed versus the `Renewal Risk (Agent)` column in
+   `out/accounts.csv`, one line each: `:red_circle: *<Account>* — <reason, ≤ 18 words>`
+   (`:large_orange_circle:` for Amber, `:large_green_circle:` for Green). If nothing moved:
+   `• No rating changes — <n> Red, <n> Amber hold.` The poster keys the message's colour bar
+   off this section.
+4. `*Headlines*` — up to 3, one line each, `• *<Account>:* <development, ≤ 20 words>`.
+5. `*Coverage*` — one line naming accounts skipped as dormant, so reduced coverage is never
    silent.
 
-Keep it tight. **Slack mrkdwn, not Markdown**: `*bold*` with single asterisks (never `**double**`),
+**Compactness is the point.** The whole brief must stay **under 300 words on Tuesday and
+Friday, under 450 on Monday** — hard caps, not targets. Every line must change what Stephen
+does today; anything that merely proves research happened goes in the synthesis JSON instead.
+Write the brief, count it, and cut until it fits.
+
+**Slack mrkdwn, not Markdown**: `*bold*` with single asterisks (never `**double**`),
 `_italic_`, `• ` for bullets. Headings are bold lines — `#` does not render. If a source was
-unavailable, add one final line naming it.
+unavailable, add one final `_italic_` line naming it (this counts against the word cap).

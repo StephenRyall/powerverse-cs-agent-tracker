@@ -25,7 +25,9 @@
  *  1. syncConnectedAssets() — live charge points per customer.
  *  2. ingestSynthesis()     — pull the newest cs-agent-synthesis.json from
  *     Drive (written each weekday by the Cowork agent) into the Accounts tab.
- *  3. checkRenewals()       — deterministic date-math alerts to Slack.
+ *  3. checkRenewals()       — deterministic date-math alerts to Slack. Posts
+ *     only when the composed message differs from the last one sent, so an
+ *     unchanged sheet never re-posts the same at-risk list every morning.
  *  4. main()                — run all three; attached to the daily 8-9am trigger.
  *
  * Setup (one-time): Script Property SLACK_WEBHOOK_URL; run setupTriggers().
@@ -341,7 +343,7 @@ function checkRenewals() {
   var blocks = [];
   if (warnings.length) blocks.push('*:calendar: Renewal warnings*\n' + warnings.join('\n'));
   if (risks.length) blocks.push('*:red_circle: At-risk accounts*\n' + risks.join('\n'));
-  if (blocks.length) postToSlack(blocks.join('\n\n'));
+  if (blocks.length) postIfChanged(blocks.join('\n\n'));
 }
 
 /* ------------------------------------------------------------------ */
@@ -362,6 +364,24 @@ function markAlert(sheet, rowNum, colIndex, state, key) {
 function fmt(d) {
   return Utilities.formatDate(d, Session.getScriptTimeZone(), 'dd MMM yyyy');
 }
+/* The warnings have per-row cooldowns, but the at-risk list is rebuilt from
+   the sheet on every run — if nothing in the sheet moved, the message is
+   byte-identical to yesterday's and posting it again is pure noise. Compare a
+   digest of the composed message against the last one sent and skip the post
+   when they match. Any real change (a new warning, an account entering or
+   leaving Red, an edited rationale) changes the digest and posts as before. */
+function postIfChanged(text) {
+  var props = PropertiesService.getScriptProperties();
+  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, text);
+  var digest = '';
+  for (var i = 0; i < bytes.length; i++) {
+    digest += ((bytes[i] & 0xff) + 0x100).toString(16).slice(1);
+  }
+  if (props.getProperty('LAST_POST_DIGEST') === digest) return;
+  postToSlack(text);
+  props.setProperty('LAST_POST_DIGEST', digest);
+}
+
 function postToSlack(text) {
   var url = PropertiesService.getScriptProperties().getProperty('SLACK_WEBHOOK_URL');
   if (!url) throw new Error('SLACK_WEBHOOK_URL script property not set');

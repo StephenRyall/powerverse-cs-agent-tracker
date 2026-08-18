@@ -6,11 +6,13 @@ writes out/brief.md, this script posts it. A deterministic poster cannot hang on
 a permission prompt, cannot post twice, and cannot post to the wrong channel.
 
 Briefs written to the STEP 5 shape (bold title line, bold section headings) are
-rendered as Block Kit: a header, a context line, and one colour-barred
-attachment whose bar is red/amber/green depending on the "Risk changes"
-section. Anything that doesn't match that shape (preflight pings, failure
-notices) falls back to the original plain-text post, so those paths never
-depend on the brief format.
+rendered as Block Kit: a header, a context line, then one attachment per
+section. Every "Risk changes" bullet gets its own red/amber/green colour bar
+keyed off that bullet's own rating change; every other section is an
+uncoloured attachment, so severity is visible per account rather than as one
+bar for the whole message. Anything that doesn't match that shape (preflight
+pings, failure notices) falls back to the original plain-text post, so those
+paths never depend on the brief format.
 
 Env:
   SLACK_BOT_TOKEN   xoxb-... with chat:write (bot must be in the channel).
@@ -33,7 +35,7 @@ import urllib.request
 SLACK_URL = "https://slack.com/api/chat.postMessage"
 MAX_CHARS = 38_000     # plain-text fallback: chat.postMessage text limit is 40k
 BLOCK_CHARS = 2_900    # per section block: Slack's mrkdwn limit is 3000
-MSG_BLOCKS = 40        # blocks per message; Slack caps at 50
+MSG_ATTACHMENTS = 40   # attachments per message; generous headroom under Slack's cap
 MSG_CHARS = 11_000     # char budget per message, so payloads stay small
 
 GREEN, AMBER, RED = "#2EB67D", "#ECB22E", "#E01E5A"
@@ -79,18 +81,31 @@ def parse_brief(text: str) -> dict | None:
     return {"title": title, "context": context, "sections": sections}
 
 
-def bar_colour(sections: list[tuple[str, list[str]]]) -> str:
-    """Red/amber/green from the Risk changes section; green when quiet."""
-    for heading, body_lines in sections:
-        if "risk changes" not in heading.lower():
+def line_colour(text: str) -> str | None:
+    """Red/amber/green if this text names its own rating change, else None —
+    a bullet that didn't move (or isn't a rating line at all) gets no bar."""
+    if ":red_circle:" in text or "→ *Red*" in text or "→ Red" in text:
+        return RED
+    if ":large_orange_circle:" in text or "→ *Amber*" in text or "→ Amber" in text:
+        return AMBER
+    if ":large_green_circle:" in text or "→ *Green*" in text or "→ Green" in text:
+        return GREEN
+    return None
+
+
+def split_risk_paragraphs(body_lines: list[str]) -> list[tuple[str | None, str]]:
+    """Split the Risk changes body into (colour, paragraph) pairs — one pair
+    per bullet, each coloured off that bullet alone, so a mixed brief (one Red
+    change, one Amber, others holding) shows every colour it actually has."""
+    body = "\n".join(body_lines).strip("\n")
+    pairs = []
+    for para in body.split("\n\n"):
+        if not para.strip():
             continue
-        body = "\n".join(body_lines)
-        if ":red_circle:" in body or "→ *Red*" in body or "→ Red" in body:
-            return RED
-        if (":large_orange_circle:" in body or "→ *Amber*" in body
-                or "→ Amber" in body):
-            return AMBER
-    return GREEN
+        stripped = para.strip()
+        colour = line_colour(stripped) if stripped.startswith(("•", "-")) else None
+        pairs.append((colour, para))
+    return pairs
 
 
 def chunk(text: str, limit: int = BLOCK_CHARS) -> list[str]:
@@ -128,31 +143,46 @@ def section_blocks(heading: str, body_lines: list[str]) -> list[dict]:
             for part in chunk(text)]
 
 
+def section_attachments(heading: str, body_lines: list[str]) -> list[dict]:
+    """One attachment for an ordinary section, or one heading attachment plus
+    one per bullet — each with its own colour — for Risk changes."""
+    if "risk changes" not in heading.lower():
+        return [{"blocks": section_blocks(heading, body_lines)}]
+
+    attachments = [{"blocks": [{"type": "section",
+                                 "text": {"type": "mrkdwn", "text": heading}}]}]
+    for colour, para in split_risk_paragraphs(body_lines):
+        att = {"blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": part}}
+                           for part in chunk(para)]}
+        if colour:
+            att["color"] = colour
+        attachments.append(att)
+    return attachments
+
+
 def build_messages(brief: dict) -> list[dict]:
-    """One parent message (header + context + colour-barred sections) plus
-    threaded continuations if the brief is unusually long."""
-    colour = bar_colour(brief["sections"])
+    """One parent message (header + context, then one attachment per
+    section) plus threaded continuations if the brief is unusually long.
+    Attachments render in the order given, so section order is preserved
+    even though only some of them carry a colour bar."""
+    all_attachments: list[dict] = []
+    for heading, body_lines in brief["sections"]:
+        all_attachments.extend(section_attachments(heading, body_lines))
 
-    all_blocks: list[dict] = []
-    for i, (heading, body_lines) in enumerate(brief["sections"]):
-        if i:
-            all_blocks.append({"type": "divider"})
-        all_blocks.extend(section_blocks(heading, body_lines))
-
-    # Greedily pack section blocks into messages within block/char budgets.
+    # Greedily pack attachments into messages within count/char budgets.
     batches, batch, batch_chars = [], [], 0
-    for block in all_blocks:
-        size = len(json.dumps(block))
-        if batch and (len(batch) >= MSG_BLOCKS or batch_chars + size > MSG_CHARS):
+    for att in all_attachments:
+        size = len(json.dumps(att))
+        if batch and (len(batch) >= MSG_ATTACHMENTS or batch_chars + size > MSG_CHARS):
             batches.append(batch)
             batch, batch_chars = [], 0
-        batch.append(block)
+        batch.append(att)
         batch_chars += size
     if batch:
         batches.append(batch)
 
     messages = []
-    for i, blocks in enumerate(batches):
+    for i, attachments in enumerate(batches):
         top: list[dict] = []
         if i == 0:
             top.append({"type": "header",
@@ -164,7 +194,7 @@ def build_messages(brief: dict) -> list[dict]:
         messages.append({
             "text": brief["title"] if i == 0 else f"{brief['title']} (cont.)",
             "blocks": top,
-            "attachments": [{"color": colour, "blocks": blocks}],
+            "attachments": attachments,
             "unfurl_links": False, "unfurl_media": False,
         })
     return messages

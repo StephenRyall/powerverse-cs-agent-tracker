@@ -37,6 +37,10 @@ var SHEET_NAME = 'Accounts';
 var SYNTHESIS_FILE = 'cs-agent-synthesis.json';
 var RENEWAL_WINDOW_DAYS = 90;
 
+/* Same palette as scripts/post_to_slack.py, so the two posting paths read as one system. */
+var AMBER_COLOUR = '#ECB22E';
+var RED_COLOUR = '#E01E5A';
+
 /* Source of live charge-point counts: "Customer Success Delivery & KPI Dashboard" */
 var CP_SOURCE_ID = '1C6jWAtzHbq-0dftz3yzrTx_LU3QIF2p4vryQvKUzqBQ';
 var CP_SOURCE_TAB = 'Real-time Charge Points';
@@ -340,10 +344,14 @@ function checkRenewals() {
     }
   }
 
-  var blocks = [];
-  if (warnings.length) blocks.push('*:calendar: Renewal warnings*\n' + warnings.join('\n'));
-  if (risks.length) blocks.push('*:red_circle: At-risk accounts*\n' + risks.join('\n'));
-  if (blocks.length) postIfChanged(blocks.join('\n\n'));
+  var groups = [];
+  if (warnings.length) {
+    groups.push({ heading: ':calendar: Renewal warnings', colour: AMBER_COLOUR, lines: warnings });
+  }
+  if (risks.length) {
+    groups.push({ heading: ':red_circle: At-risk accounts', colour: RED_COLOUR, lines: risks });
+  }
+  if (groups.length) postIfChanged(groups);
 }
 
 /* ------------------------------------------------------------------ */
@@ -367,28 +375,68 @@ function fmt(d) {
 /* The warnings have per-row cooldowns, but the at-risk list is rebuilt from
    the sheet on every run — if nothing in the sheet moved, the message is
    byte-identical to yesterday's and posting it again is pure noise. Compare a
-   digest of the composed message against the last one sent and skip the post
+   digest of the composed groups against the last one sent and skip the post
    when they match. Any real change (a new warning, an account entering or
    leaving Red, an edited rationale) changes the digest and posts as before. */
-function postIfChanged(text) {
+function postIfChanged(groups) {
+  var digestSource = groups.map(function (g) {
+    return g.heading + '\n' + g.lines.join('\n');
+  }).join('\n\n');
+
   var props = PropertiesService.getScriptProperties();
-  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, text);
+  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, digestSource);
   var digest = '';
   for (var i = 0; i < bytes.length; i++) {
     digest += ((bytes[i] & 0xff) + 0x100).toString(16).slice(1);
   }
   if (props.getProperty('LAST_POST_DIGEST') === digest) return;
-  postToSlack(text);
+  postToSlack(buildAlertPayload(groups));
   props.setProperty('LAST_POST_DIGEST', digest);
 }
 
-function postToSlack(text) {
+/* One header block plus one colour-barred attachment per group, so renewal
+   warnings (amber) and at-risk accounts (red) read as distinct at a glance
+   instead of one plain-text wall — matching the Block Kit shape
+   scripts/post_to_slack.py already uses for the morning brief. Each group's
+   lines are packed into section blocks under Slack's 3000-char mrkdwn limit
+   per block, so a long Red list doesn't get silently rejected. */
+var BLOCK_CHAR_LIMIT = 2900;
+
+function groupBlocks_(heading, lines) {
+  var blocks = [];
+  var current = '*' + heading + '*';
+  lines.forEach(function (line) {
+    if (current.length + line.length + 1 > BLOCK_CHAR_LIMIT) {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: current } });
+      current = line;
+    } else {
+      current += '\n' + line;
+    }
+  });
+  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: current } });
+  return blocks;
+}
+
+function buildAlertPayload(groups) {
+  return {
+    text: 'CS Agent Tracker alert',
+    blocks: [{
+      type: 'header',
+      text: { type: 'plain_text', text: 'CS Agent Tracker — alert' }
+    }],
+    attachments: groups.map(function (g) {
+      return { color: g.colour, blocks: groupBlocks_(g.heading, g.lines) };
+    })
+  };
+}
+
+function postToSlack(payload) {
   var url = PropertiesService.getScriptProperties().getProperty('SLACK_WEBHOOK_URL');
   if (!url) throw new Error('SLACK_WEBHOOK_URL script property not set');
   UrlFetchApp.fetch(url, {
     method: 'post',
     contentType: 'application/json',
-    payload: JSON.stringify({ text: text })
+    payload: JSON.stringify(payload)
   });
 }
 

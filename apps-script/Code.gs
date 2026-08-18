@@ -1,6 +1,12 @@
 /**
- * CS Agent Tracker — Apps Script (v3)
+ * CS Agent Tracker — Apps Script (v4)
  * Bound to the "CS Agent Tracker" Google Sheet.
+ *
+ * v4 changes:
+ *  - syncConnectedAssets() now also detects milestone crossings — a customer's
+ *    Connected Assets count passing a new multiple of MILESTONE_STEP — by
+ *    comparing against the value it's about to overwrite. checkRenewals()
+ *    posts these as a green Slack group alongside the amber/red ones.
  *
  * v2 changes:
  *  - Columns are resolved BY HEADER NAME, never by fixed index. You can
@@ -16,18 +22,18 @@
  *  - syncConnectedAssets() pulls live charge-point counts from the
  *    "Real-time Charge Points" tab of the CS Delivery & KPI Dashboard
  *    (populated by the Grafana agent) into the Connected Assets column.
- *    Value-only: it overwrites the number and raises no Slack alerts.
  *  - Account names are matched by normalisation + token overlap, so
  *    "Evtec (EON)"→"EON", "JPL Stevie"→"JPL", "Evo"→"EVO EV" resolve
  *    without a hand-maintained alias table.
  *
  * Responsibilities:
- *  1. syncConnectedAssets() — live charge points per customer.
+ *  1. syncConnectedAssets() — live charge points per customer; returns any
+ *     milestone crossings for checkRenewals() to post.
  *  2. ingestSynthesis()     — pull the newest cs-agent-synthesis.json from
  *     Drive (written each weekday by the Cowork agent) into the Accounts tab.
- *  3. checkRenewals()       — deterministic date-math alerts to Slack. Posts
- *     only when the composed message differs from the last one sent, so an
- *     unchanged sheet never re-posts the same at-risk list every morning.
+ *  3. checkRenewals()       — deterministic date-math alerts, plus milestones,
+ *     to Slack. Posts only when the composed message differs from the last
+ *     one sent, so an unchanged sheet never re-posts the same list every day.
  *  4. main()                — run all three; attached to the daily 8-9am trigger.
  *
  * Setup (one-time): Script Property SLACK_WEBHOOK_URL; run setupTriggers().
@@ -38,8 +44,12 @@ var SYNTHESIS_FILE = 'cs-agent-synthesis.json';
 var RENEWAL_WINDOW_DAYS = 90;
 
 /* Same palette as scripts/post_to_slack.py, so the two posting paths read as one system. */
+var GREEN_COLOUR = '#2EB67D';
 var AMBER_COLOUR = '#ECB22E';
 var RED_COLOUR = '#E01E5A';
+
+/* Charge-point count that triggers a milestone alert, and every multiple of it. */
+var MILESTONE_STEP = 1000;
 
 /* Source of live charge-point counts: "Customer Success Delivery & KPI Dashboard" */
 var CP_SOURCE_ID = '1C6jWAtzHbq-0dftz3yzrTx_LU3QIF2p4vryQvKUzqBQ';
@@ -65,9 +75,9 @@ var HDR = {
 };
 
 function main() {
-  syncConnectedAssets();
+  var milestones = syncConnectedAssets();
   ingestSynthesis();
-  checkRenewals();
+  checkRenewals(milestones);
 }
 
 /** Resolve {headerKey: columnIndex(1-based)} from row 1. Missing headers → absent. */
@@ -97,34 +107,40 @@ function setField_(sheet, col, rowNum, value) {
 /**
  * Pulls "Total No. CPs" per account from the Real-time Charge Points tab of
  * the CS Delivery & KPI Dashboard and overwrites the Connected Assets cell
- * for each matching customer. Never extends the grid, never alerts.
+ * for each matching customer. Never extends the grid, never alerts on its
+ * own — but returns any milestones crossed, for checkRenewals() to post.
  */
 function syncConnectedAssets() {
   var source = readChargePointSource_();
-  if (!source.length) { Logger.log('Connected Assets: no source rows found — skipped'); return; }
+  if (!source.length) { Logger.log('Connected Assets: no source rows found — skipped'); return []; }
 
   var sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAME);
   var col = resolveColumns_(sheet);
-  if (!col.CUSTOMER) { Logger.log('Customer column not found — aborting asset sync'); return; }
-  if (!col.CONNECTED_ASSETS) { Logger.log('Connected Assets column not found — skipped'); return; }
+  if (!col.CUSTOMER) { Logger.log('Customer column not found — aborting asset sync'); return []; }
+  if (!col.CONNECTED_ASSETS) { Logger.log('Connected Assets column not found — skipped'); return []; }
 
   var lastRow = sheet.getLastRow();
-  if (lastRow < 2) return;
+  if (lastRow < 2) return [];
   var names = sheet.getRange(2, col.CUSTOMER, lastRow - 1, 1).getValues();
+  // Read before overwriting — this is the only point where the previous
+  // count still exists, so a milestone crossing has to be detected here.
+  var previous = sheet.getRange(2, col.CONNECTED_ASSETS, lastRow - 1, 1).getValues();
 
   var targets = [];
   for (var r = 0; r < names.length; r++) {
     var name = String(names[r][0]).trim();
-    if (name) targets.push({ name: name, rowNum: r + 2 });
+    if (name) targets.push({ name: name, rowNum: r + 2, previousCount: parseCount_(previous[r][0]) });
   }
 
   var pairs = matchAccounts_(targets, source);
-  var written = 0, missed = [];
+  var written = 0, missed = [], milestones = [];
 
   pairs.forEach(function (p) {
     if (p.match) {
       setField_(sheet, col.CONNECTED_ASSETS, p.target.rowNum, p.match.count);
       written++;
+      var threshold = milestoneCrossed_(p.target.previousCount, p.match.count);
+      if (threshold) milestones.push({ customer: p.target.name, threshold: threshold });
     } else {
       missed.push(p.target.name);
     }
@@ -132,6 +148,27 @@ function syncConnectedAssets() {
 
   Logger.log('Connected Assets updated for ' + written + '/' + targets.length + ' customers' +
     (missed.length ? ' — unmatched: ' + missed.join(', ') : ''));
+  return milestones;
+}
+
+/**
+ * The highest multiple of MILESTONE_STEP newly reached, or null. Fires only
+ * on a genuine increase past a boundary — a missing/blank previous count
+ * (no baseline yet) or a drop (data correction) never alerts, and a count
+ * that was already past a boundary last run doesn't alert again for it.
+ */
+function milestoneCrossed_(previousCount, currentCount) {
+  if (previousCount === null || currentCount === null) return null;
+  if (currentCount <= previousCount) return null;
+  var oldTier = Math.floor(previousCount / MILESTONE_STEP);
+  var newTier = Math.floor(currentCount / MILESTONE_STEP);
+  if (newTier < 1 || newTier <= oldTier) return null;
+  return newTier * MILESTONE_STEP;
+}
+
+/** 1000 → "1,000" — deterministic regardless of script locale. */
+function formatNumber_(n) {
+  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
 /** Read [{account, count}] from the source tab, locating the header row by name. */
@@ -295,7 +332,8 @@ function ingestSynthesis() {
 /* ------------------------------------------------------------------ */
 /* 3. Deterministic renewal / risk alerts                               */
 /* ------------------------------------------------------------------ */
-function checkRenewals() {
+function checkRenewals(milestones) {
+  milestones = milestones || [];
   var sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAME);
   var col = resolveColumns_(sheet);
   if (!col.CUSTOMER) return;
@@ -345,6 +383,15 @@ function checkRenewals() {
   }
 
   var groups = [];
+  if (milestones.length) {
+    groups.push({
+      heading: ':tada: Milestones', colour: GREEN_COLOUR,
+      lines: milestones.map(function (m) {
+        return '*' + m.customer + '* installed over *' + formatNumber_(m.threshold) +
+          '* charge points to date';
+      })
+    });
+  }
   if (warnings.length) {
     groups.push({ heading: ':calendar: Renewal warnings', colour: AMBER_COLOUR, lines: warnings });
   }

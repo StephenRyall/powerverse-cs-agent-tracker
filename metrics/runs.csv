@@ -4,3 +4,4 @@ date,run_number,cost_usd,duration_s,turns,input_tokens,output_tokens,cache_read_
 2026-08-14 04:47,5,2.8645,332,22,3833,44575,1398035,13,5,62,claude-haiku-4-5-20251001 claude-opus-5 claude-sonnet-5
 2026-08-17 03:47,6,5.2277,138,5,3875,61827,4100534,13,2,85,claude-haiku-4-5-20251001 claude-opus-5 claude-sonnet-5
 2026-08-18 03:41,7,3.0177,364,25,4217,43145,1821861,13,4,69,claude-haiku-4-5-20251001 claude-opus-5 claude-sonnet-5
+2026-08-21 03:48,8,4.3034,143,9,4249,51480,3234408,13,4,69,claude-haiku-4-5-20251001 claude-opus-5 claude-sonnet-5
